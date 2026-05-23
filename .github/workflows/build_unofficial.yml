@@ -2,7 +2,7 @@ name: Build Windows (CPU + Vulkan)
 
 on:
   push:
-    branches: [main, master]
+    branches: [b1-mtp-qwen-rebase, main, master]
   workflow_dispatch:
   pull_request:
 
@@ -66,9 +66,9 @@ jobs:
         id: cmake_build
         shell: cmd
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
-          cmake -S . -B build ^
-            -DCMAKE_BUILD_TYPE=Release ^
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DCMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake ^
             -DGGML_NATIVE=OFF ^
             -DLLAMA_BUILD_SERVER=ON ^
             -DLLAMA_BUILD_BORINGSSL=ON ^
@@ -76,7 +76,7 @@ jobs:
             -DGGML_BACKEND_DL=ON ^
             -DGGML_CPU_ALL_VARIANTS=ON ^
             -DGGML_VULKAN=ON ^
-            -DBUILD_SHARED_LIBS=OFF ^
+            -DBUILD_SHARED_LIBS=ON ^
             -DLLAMA_BUILD_EXAMPLES=ON ^
             -DLLAMA_BUILD_TESTS=OFF
           set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
@@ -94,6 +94,10 @@ jobs:
           Copy-Item "build\bin\Release\llama-perplexity.exe" "$out\" -ErrorAction SilentlyContinue
           Copy-Item "build\bin\Release\llama-quantize.exe" "$out\" -ErrorAction SilentlyContinue
           Copy-Item "build\bin\Release\llama-simple.exe" "$out\" -ErrorAction SilentlyContinue
+          # 动态链接时需要复制 DLL
+          Copy-Item "build\bin\Release\ggml.dll" "$out\" -ErrorAction SilentlyContinue
+          Copy-Item "build\bin\Release\ggml-base.dll" "$out\" -ErrorAction SilentlyContinue
+          Copy-Item "build\bin\Release\llama.dll" "$out\" -ErrorAction SilentlyContinue
           Copy-Item "build\bin\Release\*.dll" "$out\" -ErrorAction SilentlyContinue
           Get-ChildItem $out
 
@@ -104,7 +108,7 @@ jobs:
           name: llama-turboquant-windows-vulkan-x64
           path: artifacts-vulkan/*
 
-      # ---------- 9. 发布到 Release (用 RELEASE_TOKEN) ----------
+      # ---------- 9. 发布到 Release ----------
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -141,4 +145,4 @@ jobs:
               --host 127.0.0.1 --port 8080
             ```
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}  # <-- 这里改成 RELEASE_TOKEN
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
