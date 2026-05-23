@@ -1,0 +1,144 @@
+name: Build Windows (CPU + Vulkan)
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows-vulkan:
+    runs-on: windows-2025
+
+    env:
+      VULKAN_VERSION: 1.4.313.2
+
+    steps:
+      # ---------- 1. 检出代码 ----------
+      - name: Clone
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      # ---------- 2. ccache 加速 ----------
+      - name: ccache
+        uses: ggml-org/ccache-action@v1.2.21
+        with:
+          key: windows-vulkan-x64
+          variant: ccache
+          evict-old-files: 1d
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+
+      # ---------- 3. 修复 ASM 编译器问题 ----------
+      - name: Fix ASM compiler issue
+        shell: pwsh
+        run: |
+          $file = "ggml/CMakeLists.txt"
+          if (Test-Path $file) {
+            $content = Get-Content $file -Raw
+            $content = $content -replace 'project\("ggml" C CXX ASM\)', 'project("ggml" C CXX)'
+            Set-Content $file $content -NoNewline
+            Write-Host "Fixed ASM in ggml/CMakeLists.txt"
+          }
+
+      # ---------- 4. 安装 Ninja ----------
+      - name: Install Ninja
+        id: install_ninja
+        run: |
+          choco install ninja
+
+      # ---------- 5. 安装 Vulkan SDK ----------
+      - name: Install Vulkan SDK
+        id: get_vulkan
+        run: |
+          curl.exe -o $env:RUNNER_TEMP/VulkanSDK-Installer.exe -L "https://sdk.lunarg.com/sdk/download/${env:VULKAN_VERSION}/windows/vulkansdk-windows-X64-${env:VULKAN_VERSION}.exe"
+          & "$env:RUNNER_TEMP\\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+          Add-Content $env:GITHUB_ENV "VULKAN_SDK=C:\\VulkanSDK\\${env:VULKAN_VERSION}"
+          Add-Content $env:GITHUB_PATH "C:\\VulkanSDK\\${env:VULKAN_VERSION}\\bin"
+
+      # ---------- 6. 编译 (CPU + Vulkan 混合) ----------
+      - name: Build
+        id: cmake_build
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B build ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DGGML_NATIVE=OFF ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            -DGGML_RPC=ON ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_CPU_ALL_VARIANTS=ON ^
+            -DGGML_VULKAN=ON ^
+            -DBUILD_SHARED_LIBS=OFF ^
+            -DLLAMA_BUILD_EXAMPLES=ON ^
+            -DLLAMA_BUILD_TESTS=OFF
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS%
+
+      # ---------- 7. 收集产物 ----------
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          $out = "artifacts-vulkan"
+          New-Item -ItemType Directory -Force -Path $out
+          Copy-Item "build\bin\Release\llama-server.exe" "$out\" -ErrorAction SilentlyContinue
+          Copy-Item "build\bin\Release\llama-cli.exe" "$out\" -ErrorAction SilentlyContinue
+          Copy-Item "build\bin\Release\llama-bench.exe" "$out\" -ErrorAction SilentlyContinue
+          Copy-Item "build\bin\Release\llama-perplexity.exe" "$out\" -ErrorAction SilentlyContinue
+          Copy-Item "build\bin\Release\llama-quantize.exe" "$out\" -ErrorAction SilentlyContinue
+          Copy-Item "build\bin\Release\llama-simple.exe" "$out\" -ErrorAction SilentlyContinue
+          Copy-Item "build\bin\Release\*.dll" "$out\" -ErrorAction SilentlyContinue
+          Get-ChildItem $out
+
+      # ---------- 8. 上传 Artifacts ----------
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-turboquant-windows-vulkan-x64
+          path: artifacts-vulkan/*
+
+      # ---------- 9. 发布到 Release (用 RELEASE_TOKEN) ----------
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts-vulkan/*
+          body: |
+            Windows x64 build with **CPU + Vulkan** hybrid support.
+            
+            **For Intel Iris Xe / AMD integrated graphics users** (no NVIDIA GPU).
+            
+            Includes:
+            - `llama-server.exe` — OpenAI-compatible API server with WebUI
+            - `llama-cli.exe` — Command-line chat
+            - `llama-bench.exe` — Benchmark tool
+            - `llama-quantize.exe` — Model quantization
+            
+            **Features enabled:**
+            - ✅ Gemma 4 MTP speculative decoding (`--mtp-head`)
+            - ✅ Qwen 3.6 NextN speculative decoding (`--spec-type nextn`)
+            - ✅ TurboQuant KV cache (`-ctk turbo3 -ctv turbo3`)
+            - ✅ Vulkan GPU offload + CPU fallback hybrid inference
+            - ✅ CPU all variants (AVX2/AVX512/AMX)
+            - ✅ RPC distributed inference
+            - ✅ BoringSSL for HTTPS
+            
+            **Usage example (Intel Iris Xe, 16GB RAM):**
+            ```cmd
+            llama-server.exe ^
+              -m gemma-4-E2B-it-Q4_K_M.gguf ^
+              --mtp-head gemma-4-E2B-it-assistant.Q4_K_M.gguf ^
+              --spec-type mtp ^
+              -ngl 35 -ngld 35 ^
+              -c 4096 ^
+              --host 127.0.0.1 --port 8080
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}  # <-- 这里改成 RELEASE_TOKEN
